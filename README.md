@@ -100,22 +100,86 @@ there's no console to print to.
 
 ## Watching a different mailbox or folder
 
-By default this watches the **default Inbox** of the signed-in profile. To
-watch a different folder -- a shared/secondary mailbox already added to
-this Outlook profile, or a subfolder rather than the Inbox -- change this
-line in `Application_Startup`:
+By default this watches the **default Inbox** of the signed-in profile.
+Both the live watcher (`Application_Startup` in `ThisOutlookSession.cls`)
+and the manual backfill (`SyncAllMailboxMessages`, below) get their folder
+from the same place -- `GetWatchedFolder()` in `modSqlSync.bas` -- so there
+is exactly one line to change, and the two can never end up pointed at
+different folders. Edit it there:
 
 ```vb
-Set InboxItems = ns.GetDefaultFolder(olFolderInbox).Items
+Public Function GetWatchedFolder() As Outlook.Folder
+    Dim ns As Outlook.NameSpace
+    Set ns = Application.GetNamespace("MAPI")
+
+    Set GetWatchedFolder = ns.GetDefaultFolder(olFolderInbox)
+End Function
 ```
 
-For a secondary mailbox added to the profile, something like:
+For a shared/secondary mailbox added to the profile, replace the last line
+with something like:
 
 ```vb
-Dim sharedInbox As Outlook.Folder
-Set sharedInbox = ns.Folders("shared-mailbox-display-name").Folders("Inbox")
-Set InboxItems = sharedInbox.Items
+Set GetWatchedFolder = ns.Folders("shared-mailbox-display-name").Folders("Inbox")
 ```
+
+The exact display name is whatever that mailbox shows as in Outlook's
+folder pane -- if you're not sure, run this in the VBA Immediate Window
+(Alt+F11, then Ctrl+G) to list every store and its top-level folders:
+
+```vb
+Sub ListAllFolders()
+    Dim ns As Outlook.NameSpace
+    Set ns = Application.GetNamespace("MAPI")
+    Dim st As Outlook.Store
+    Dim rootFolder As Outlook.Folder
+    Dim topFolder As Outlook.Folder
+    Dim subFolder As Outlook.Folder
+
+    For Each st In ns.Stores
+        Debug.Print "STORE: " & st.DisplayName
+        On Error Resume Next
+        Set rootFolder = Nothing
+        Set rootFolder = st.GetRootFolder
+        On Error GoTo 0
+
+        If Not rootFolder Is Nothing Then
+            On Error Resume Next
+            For Each topFolder In rootFolder.Folders
+                Debug.Print "  " & topFolder.Name
+                For Each subFolder In topFolder.Folders
+                    Debug.Print "    " & subFolder.Name
+                Next subFolder
+            Next topFolder
+            On Error GoTo 0
+        End If
+    Next st
+End Sub
+```
+
+## Running it manually on demand (backfill)
+
+`modSqlSync.bas` includes `SyncAllMailboxMessages`, a separate `Sub` that
+loops over every item currently sitting in the watched folder and syncs each
+one -- not just new arrivals. It's safe to run any time: `SyncMailItemToSql`
+already skips anything whose `MessageId` is already in the table, so
+re-running it never creates duplicates. Useful for catching up mail that
+arrived before this macro was set up, or while Outlook was closed (remember,
+this project is event-driven only -- see the caveat at the top of this
+README).
+
+It targets whatever `GetWatchedFolder()` (in `modSqlSync.bas`) returns --
+the same function `Application_Startup` uses for the live watcher -- so
+there's no separate folder setting to keep in sync; change
+`GetWatchedFolder()` once and both the live sync and this backfill follow.
+
+To run it as a one-click button instead of from the VBA editor: **File >
+Options > Quick Access Toolbar**, set "Choose commands from" to **Macros**,
+select `SyncAllMailboxMessages`, click **Add >>**, then **OK**. It now shows
+as an icon in Outlook's Quick Access Toolbar -- one click runs the backfill
+and shows a summary (items found / synced / failed) when it's done. The same
+"Macros" source is available under **File > Options > Customize Ribbon** if
+you'd rather have a labeled ribbon button instead of a small toolbar icon.
 
 ## Notes on the data captured
 
@@ -144,6 +208,17 @@ Set InboxItems = sharedInbox.Items
 - **Log file shows a permission error** -- the SQL login (or Windows
   account, if using Option C) needs `INSERT`/`SELECT` on the destination
   table.
+- **It's writing your own mail instead of the mailbox you actually care
+  about** -- `GetWatchedFolder()` is returning your own default Inbox
+  (the out-of-the-box default), not the shared/secondary mailbox you meant.
+  See "Watching a different mailbox or folder" above -- you need to point it
+  at that mailbox's folder explicitly; it's never inferred automatically.
+- **`ListAllFolders` (or a similar recursive folder-walk macro) throws an
+  error partway through** -- a hidden system folder, search folder, or a
+  shared-mailbox subfolder you don't have full rights to can error out
+  mid-loop. Wrap folder access in `On Error Resume Next` / `On Error GoTo 0`
+  per folder (as the `ListAllFolders` version in this README already does)
+  rather than letting one bad folder abort the whole listing.
 
 ## License
 

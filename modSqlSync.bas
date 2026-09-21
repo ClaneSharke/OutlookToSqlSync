@@ -136,3 +136,70 @@ Private Sub LogError(ByVal procName As String, ByVal errNum As Long, ByVal errDe
     Print #fnum, Format$(Now, "yyyy-mm-dd hh:nn:ss") & " ERROR in " & procName & ": (" & errNum & ") " & errDesc
     Close #fnum
 End Sub
+
+' --------------------------------------------------------------------------
+' Single source of truth for which folder this project watches. Both the
+' live ItemAdd watcher (ThisOutlookSession.Application_Startup) and the
+' manual backfill (SyncAllMailboxMessages below) call THIS SAME function, so
+' there is exactly one place to edit -- change it here and both the live
+' sync and the backfill point at the new folder together, with no way for
+' them to drift out of sync with each other.
+'
+' Default: your own Inbox. For a shared/secondary mailbox added to this
+' profile, comment the line below out and use something like:
+'   Set GetWatchedFolder = ns.Folders("shared-mailbox-display-name").Folders("Inbox")
+' See README.md, "Watching a different mailbox or folder", for how to find
+' the exact display name.
+' --------------------------------------------------------------------------
+Public Function GetWatchedFolder() As Outlook.Folder
+    Dim ns As Outlook.NameSpace
+    Set ns = Application.GetNamespace("MAPI")
+
+    Set GetWatchedFolder = ns.GetDefaultFolder(olFolderInbox)
+End Function
+
+' --------------------------------------------------------------------------
+' Manual backfill: syncs every mail item CURRENTLY sitting in the watched
+' folder (GetWatchedFolder, above -- the same folder the live watcher uses),
+' not just new arrivals. Safe to re-run any time -- SyncMailItemToSql
+' already skips anything whose MessageId is already in the table, so this
+' never creates duplicates. Useful for catching up mail that arrived before
+' this macro was set up, or while Outlook was closed (this project is
+' event-driven only -- see README.md's opening caveat).
+'
+' To turn this into an actual clickable button instead of running it from
+' the VBA editor: File > Options > Quick Access Toolbar > "Choose commands
+' from" > Macros > select SyncAllMailboxMessages > Add >> > OK. It then
+' shows as a one-click icon in Outlook's Quick Access Toolbar.
+' --------------------------------------------------------------------------
+Public Sub SyncAllMailboxMessages()
+    Dim targetFolder As Outlook.Folder
+    Set targetFolder = GetWatchedFolder()
+
+    Dim total As Long, synced As Long, failed As Long
+    total = targetFolder.Items.Count
+
+    Dim i As Long
+    Dim itm As Object
+    For i = 1 To total
+        Set itm = targetFolder.Items(i)
+        If TypeOf itm Is Outlook.MailItem Then
+            On Error Resume Next
+            Err.Clear
+            SyncMailItemToSql itm
+            If Err.Number <> 0 Then
+                failed = failed + 1
+            Else
+                synced = synced + 1
+            End If
+            On Error GoTo 0
+        End If
+    Next i
+
+    MsgBox "Backfill complete." & vbCrLf & _
+           "Mail items in folder: " & total & vbCrLf & _
+           "Synced OK (new or already present): " & synced & vbCrLf & _
+           "Failed: " & failed & vbCrLf & vbCrLf & _
+           "Check " & Environ$("USERPROFILE") & "\OutlookToSqlSync.log for failure details.", _
+           vbInformation, "OutlookToSqlSync - Manual Backfill"
+End Sub
